@@ -14,6 +14,9 @@ class SVF:
                max_radius = None):
     self.mds_src = rasterio.open(mds_path)
     self.mds = self.mds_src.read(1).astype('float16')
+    ## TODO
+    # PAD
+    # rasterio.pad(seila.mds, seila.mds_src.transform, 5, mode='reflect')[0]
     self.observer_height = observer_height
     self.kernel_size = self._is_kernel_size_odd(kernel_size)
     
@@ -27,6 +30,11 @@ class SVF:
     self.downscale_times = math.ceil(math.log2(self.pixel_max_size / max(self.mds_src.res)) + 1)
 
     self.view_as_windows = view_as_windows(self.mds, (self.kernel_size, self.kernel_size))
+
+## TODOO
+# Interagindo entre as outras resolucoes
+# faz a convooluçao em 4000X4000, 2000X2000, 1000X1000 
+# e depois expande com np.repeat() e vai concatenando
 
   def _is_kernel_size_odd(self, kernel_size):
     if int(kernel_size) % 2 == 0:
@@ -46,11 +54,8 @@ class SVF:
 
     for i in range(4):
         l = line(*np.roll(extremes, -i, axis=0)[0:2].flatten())
-    #     if i == 3:
-    #         start_index = 0
         fuse_angles.append(np.arctan2(*(np.array(l) - kernel_size // 2)[:, start_index:]))
         external_coords.append(np.array(l, dtype='uint8').T[start_index:])
-    #     start_index = 1
 
     external_coords = np.concatenate(external_coords)
     fuse_angles = np.concatenate(fuse_angles)
