@@ -1,0 +1,7 @@
+rasterio
+numpy
+pyproj
+scipy
+scikit-learn
+jupyter
+scikit-image
