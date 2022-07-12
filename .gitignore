@@ -1,5 +1,6 @@
 # Raw Data
 test/data/*.tiff
+tmp/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
