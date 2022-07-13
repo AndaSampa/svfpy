@@ -7,6 +7,7 @@ from skimage.draw import line
 from skimage.util import view_as_windows
 import numpy as np
 from rasterio.enums import Resampling
+import zarr
 
 class SVF:
   def __init__(self, 
@@ -60,15 +61,40 @@ def distance_matrix(size=11):
           
   return distances
 
+def lines_mask(svf:SVF):
+  lines_mask = np.zeros((_fuse_lines(svf).shape[0], svf.kernel_size, svf.kernel_size), dtype='bool')
+  for k, fl in enumerate(_fuse_lines(svf)):
+      lm = np.zeros((svf.kernel_size, svf.kernel_size), dtype='bool')
+      lm[fl[:, 0], fl[:, 1]] = True
+      lines_mask[k] = lm
+  return lines_mask
+  # print(lines_mask[8].astype('int'))
+
 def calculate(svf:SVF):
 
   # Levantando os parâmetros para o calculo
   pixel_max_size = math.ceil(svf.max_radius / math.floor(svf.kernel_size / 2) * max(svf.mds_src.res))
   downscale_times = math.ceil(math.log2(pixel_max_size / max(svf.mds_src.res)) + 1)
+  itens_quantity_by_scale = ((svf.kernel_size//2) + 1) / 2
+  print(itens_quantity_by_scale)
 
   # Abre o MDS, com PADs
   mds =  svf.mds_src.read(1).astype('float16')
   mdss, transformations = [], []
+
+  # Cria um arquivo em disco para persistir os calculos
+  # result_temp = zarr.open(
+  #   '../tmp/result_temp.zarr', 
+  #   mode='w', 
+  #   shape=(svf.mds_src.width, 
+  #         svf.mds_src.height, 
+  #         (svf.kernel_size * 4) - 4, 
+  #         (downscale_times * itens_quantity_by_scale) + itens_quantity_by_scale), 
+  #   chunks=(1000,1000), 
+  #   dtype=np.float32
+  # )
+
+  # result_temp = zarr.zeros((4000,4000,40,36))
 
   for i in np.arange(downscale_times):
     mds, transform = warp.reproject(source=svf.mds_src.read(1),
@@ -81,13 +107,29 @@ def calculate(svf:SVF):
 
     # Adiciona PAD
     mds, transform = rasterio.pad(np.squeeze(mds), transform, svf.kernel_size // 2, mode='reflect')
+    mds = mds.astype('float16')
 
-    print('rays ..')
+    # Forma janelas do tamanho dos Kernels definidos
     windows = view_as_windows(mds, (svf.kernel_size, svf.kernel_size))
+    
+    # Adicionar as linhas no arquivo de resultados temporarios
+    masks = lines_mask(svf)
+    for k, l in enumerate(masks):
+      # result_temp[:, :, k, 0:6] = windows[np.tile(l, (4000, 4000,1,1))].reshape(4000,4000,6)
+      seila = windows[:, :, masks[0,:,:].reshape(svf.kernel_size, svf.kernel_size)]
 
-    # print('kernel ..')
-    # fuse_lines = _fuse_lines(svf)
-    # list_windows = windows[:, :, fuse_lines[:, :, 0], fuse_lines[:, :, 1]]
+    # Calcular o angulo para cada pixel
+    print('.. difff')
+    h_diff = np.subtract(windows, np.expand_dims(windows[:,:,svf.kernel_size//2,svf.kernel_size//2], axis=(2,3)))
+    print(' .. angles')
+    angles = np.arctan2(h_diff, (distance_matrix() * 0.5)) 
+
+    # Calcula o angulo máximo para cada fuso
+    max_angles = np.zeros((windows.shape[0], windows.shape[1], (svf.kernel_size * 4) - 4), dtype=np.float16)
+    for k, l in enumerate(masks):
+      print('.')
+      max_angles[:, :, l] = np.max(angles[:, :, masks[0,:,:]], axis=2)
+
 
     ######################################################
     ## TODO
@@ -99,9 +141,10 @@ def calculate(svf:SVF):
     transformations.append(transform)
 
     break
-  
-  return windows
+  return angles
+  # return windows
   # return mdss, transformations
+
 
 def _fuse_lines(svf:SVF):
   # kernel_size = svf.kernel_size

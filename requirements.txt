@@ -5,3 +5,4 @@ scipy
 scikit-learn
 jupyter
 scikit-image
+zarr
