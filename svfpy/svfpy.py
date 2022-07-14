@@ -81,7 +81,7 @@ def calculate(svf:SVF):
   fuse_lines = _fuse_lines(svf)
   # print(itens_quantity_by_scale)
 
-  # Abre o MDS, com PADs
+  # Abre o MDS
   mds =  svf.mds_src.read(1).astype('float16')
   mdss, transformations = [], []
 
