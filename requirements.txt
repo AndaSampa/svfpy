@@ -6,3 +6,4 @@ scikit-learn
 jupyter
 scikit-image
 zarr
+rioxarray
