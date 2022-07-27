@@ -5,6 +5,7 @@ import math
 from scipy.spatial.distance import euclidean
 from skimage.draw import line
 from skimage.util import view_as_windows
+from scipy import ndimage, misc
 import numpy as np
 from rasterio.enums import Resampling
 import zarr
@@ -61,6 +62,28 @@ def distance_matrix(size=11):
           
   return distances
 
+def zoom2d(matrix, times:int):
+  shape  = matrix.shape
+  dims = len(shape)
+
+  matrix_zomed = \
+  np.tile(
+    np.expand_dims(
+      np.tile(
+        np.expand_dims(matrix, axis=2),
+        tuple(np.concatenate([np.array([1,1, times]), np.ones(dims-2, dtype='int')]))
+      ).reshape(
+        tuple(np.array(shape) * np.concatenate([np.array([1,times]), np.ones(dims-2, dtype='int')]))
+      ),
+      axis=1
+    ),
+    tuple(np.concatenate([np.array([1,times]), np.ones(dims-1, dtype='int')]))
+  ).reshape(
+    tuple(np.array(shape) * np.concatenate([np.array([times,times]), np.ones(dims-2, dtype='int')]))
+  )
+  
+  return matrix_zomed
+
 def lines_mask(svf:SVF):
   lines_mask = np.zeros((_fuse_lines(svf).shape[0], svf.kernel_size, svf.kernel_size), dtype='bool')
   for k, fl in enumerate(_fuse_lines(svf)):
@@ -87,26 +110,28 @@ def calculate(svf:SVF):
 
   # Arranjo da array de mascaras
   masks = lines_mask(svf)
-  a_masks = np.argwhere(masks).reshape(kernel_border_quantity,itens_quantity_by_scale * 2,3)[:,:,1:]
+  # a_masks = np.argwhere(masks).reshape(kernel_border_quantity,itens_quantity_by_scale * 2,3)[:,:,1:]
 
   # Cria um arquivo em disco para persistir os calculos
-  result_temp = zarr.open(
-    '../tmp/result_temp.zarr', 
-    mode='a', 
-    shape=(svf.mds_src.width, 
-          svf.mds_src.height, 
-          kernel_border_quantity, 
-          pixels_per_angle), 
-    chunks=(50,50), 
-    dtype=np.float16
-  )
+  # result_temp = zarr.open(
+  #   '../tmp/result_temp.zarr', 
+  #   mode='a', 
+  #   shape=(svf.mds_src.width, 
+  #         svf.mds_src.height, 
+  #         kernel_border_quantity, 
+  #         pixels_per_angle), 
+  #   chunks=(50,50), 
+  #   dtype=np.float16
+  # )
 
   distance_rows = np.zeros((kernel_border_quantity, pixels_per_angle), dtype='float16')
-  result_temp = zarr.zeros((svf.mds_src.width, svf.mds_src.height,kernel_border_quantity,pixels_per_angle))
+  # result_temp = zarr.zeros((svf.mds_src.width, svf.mds_src.height,kernel_border_quantity,pixels_per_angle))
+  result_temp = np.zeros((svf.mds_src.width, svf.mds_src.height,kernel_border_quantity,pixels_per_angle), dtype='float16')
 
   for i in np.arange(downscale_times):
 
     resolution = tuple([r * (2 ** i) for r in svf.mds_src.res])
+    fuse_angle_range = svf.external_coordinates()[-1]
 
     # Calcula arquivo
     mds, transform = warp.reproject(source=svf.mds_src.read(1),
@@ -118,45 +143,46 @@ def calculate(svf:SVF):
                                     resampling=Resampling.max)
 
     # Adiciona PAD
-    mds, transform = rasterio.pad(np.squeeze(mds), transform, svf.kernel_size // 2, mode='reflect')
-    mds = mds.astype('float16')
-
+    # mds, transform = rasterio.pad(np.squeeze(mds), transform, svf.kernel_size // 2, mode='edge')
+    # mds = mds.astype('float16')
+    # mds = ndimage.uniform_filter(np.pad(np.squeeze(mds), svf.kernel_size // 2), size=(i**2)/2, mode='nearest')
+    mds = np.pad(np.squeeze(mds), svf.kernel_size // 2)
+    
     # Forma janelas do tamanho dos Kernels definidos
     windows = view_as_windows(mds, (svf.kernel_size, svf.kernel_size))
-    points = np.tile(windows[:,:, svf.kernel_size//2, svf.kernel_size//2].reshape(mds.shape[0] - svf.kernel_size + 1, mds.shape[1] - svf.kernel_size + 1,1,1), (1,1,kernel_border_quantity,1))
-    
+
     # Adicionar as linhas no arquivo de resultados temporarios        
     if i == 0:
-      rows = windows[:, :, a_masks[:, :, 0], a_masks[:, :, 1]]
       index = (0, itens_quantity_by_scale * 2)
       print(index)
       # Array de distancias em linhas
       distance_rows[:, index[0]:index[1]] = distance_matrix(size=svf.kernel_size)[fuse_lines[:, :, 0], fuse_lines[:, :, 1]][:, :] * resolution[0]
+      distance_row = distance_matrix(size=svf.kernel_size)[fuse_lines[:, :, 0], fuse_lines[:, :, 1]][:, :] * resolution[0]
+      rows = windows[:, :, fuse_lines[:, :, 0], fuse_lines[:, :, 1]]
+      points = np.expand_dims(rows[:,:,:,0],axis=3)
       # result_temp[:, :, :, index[0]:index[1]] = rows
     else:
       index = (int(i * itens_quantity_by_scale) + itens_quantity_by_scale, int(i * itens_quantity_by_scale) + itens_quantity_by_scale * 2)
       print(index)
       # Array de distancias em linhas
-      distance_rows[:, index[0]:index[1]] = distance_matrix(size=svf.kernel_size)[fuse_lines[:, :, 0], fuse_lines[:, :, 1]][:, 3:6] * resolution[0]
-      windows = np.tile(windows, (2**i, 2**i, 1, 1))
-      points = np.tile(points, (2**i, 2**i, 1, 1))[0:svf.mds_src.width, 0:svf.mds_src.width, :, :]
-      # break
-      rows = windows[:, :, a_masks[:, :, 0], a_masks[:, :, 1]][0:svf.mds_src.width, 0:svf.mds_src.width, :, itens_quantity_by_scale:]
+      distance_row = distance_matrix(size=svf.kernel_size)[fuse_lines[:, :, 0], fuse_lines[:, :, 1]][:, itens_quantity_by_scale:itens_quantity_by_scale*2] * resolution[0]
 
-    # Adiciona o calculo do angulo aos resultados temporários
-    result_temp[:, :, :, index[0]:index[1]] = np.arctan2(rows - points, distance_rows[:, index[0]:index[1]])
-
-    ## TODO
-    # Achar o angulo máximo ou ArgMax
-    # np.max(result_temp[:500, :500, :, 1:], axis=3)
-
-    # Persistir o dado
+      rows = windows[:, :, fuse_lines[:, :, 0], fuse_lines[:, :, 1]]
+      rows = zoom2d(rows, 2**i)[0:svf.mds_src.width, 0:svf.mds_src.width, :, itens_quantity_by_scale:] 
+    
+    print('Calculando arctan')
+    result_temp[:, :, :, index[0]:index[1]] = np.arctan2(rows - points - svf.observer_height, distance_row)   
 
 
 
-  return result_temp
+  # print('Calulando arctan ...')
+  # result = np.arctan2(result_temp - np.expand_dims(result_temp[:,:,:,0],axis=3) - svf.observer_height, distance_rows)
+  print('Calulando max ...')
+  result_max = np.max(result_temp[:,:,:, 1:], axis=3)
+  print('Calculando SVF ..')
+  svf_result = np.sum((fuse_angle_range/np.pi/-2) * (1 - np.sin(np.where(result_max >= 0., result_max, np.deg2rad(0)))/1), axis=2)
 
-
+  return svf_result
 
 def _fuse_lines(svf:SVF):
   # kernel_size = svf.kernel_size
@@ -171,7 +197,7 @@ def _fuse_lines(svf:SVF):
   
   return fuse_lines
 
-def _rays(svf):
-  kernel = view_as_windows(svf.mds, (self.kernel_size, self.kernel_size))
-  return kernel
-  # return kernel[:, :, self.fuse_lines()[:, :, 0], self.fuse_lines()[:, :, 1]]
+# def _rays(svf):
+#   kernel = view_as_windows(svf.mds, (self.kernel_size, self.kernel_size))
+#   return kernel
+#   # return kernel[:, :, self.fuse_lines()[:, :, 0], self.fuse_lines()[:, :, 1]]
