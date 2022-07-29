@@ -7,3 +7,4 @@ jupyter
 scikit-image
 zarr
 rioxarray
+opencv-python
