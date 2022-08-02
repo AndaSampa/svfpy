@@ -1,4 +1,5 @@
-rasterio
+gdal
+rasterio --no-binary=rasterio
 numpy
 pyproj
 scipy
@@ -11,3 +12,4 @@ opencv-python
 pyproj
 ladybug-core
 numba
+"dask[complete]"  
