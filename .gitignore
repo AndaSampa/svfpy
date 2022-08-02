@@ -1,6 +1,7 @@
 # Raw Data
 test/data/*.tiff
 tmp/*
+data/raster/*.*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
