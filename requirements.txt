@@ -12,4 +12,4 @@ opencv-python
 pyproj
 ladybug-core
 numba
-"dask[complete]"  
+dask[complete]  
