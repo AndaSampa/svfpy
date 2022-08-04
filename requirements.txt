@@ -1,5 +1,5 @@
 gdal
-rasterio --no-binary=rasterio
+rasterio #--no-binary=rasterio
 numpy
 pyproj
 scipy
@@ -8,8 +8,7 @@ jupyter
 scikit-image
 zarr
 rioxarray
-opencv-python
 pyproj
-ladybug-core
+# ladybug-core
 numba
 dask[complete]  
