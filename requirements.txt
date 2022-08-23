@@ -12,3 +12,4 @@ pyproj
 # ladybug-core
 numba
 dask[complete]  
+matplotlib
