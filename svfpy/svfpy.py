@@ -2,6 +2,8 @@ import rioxarray
 import numpy as np
 import os
 import tempfile
+from multiprocessing import Pool
+from scipy import ndimage
 
 class SVF:
     def __init__(self,
@@ -19,16 +21,15 @@ class SVF:
         self.downscales_path = downscales_path
         self.xmds = rioxarray.open_rasterio(mds_file)
         self.resolution = self.xmds.rio.resolution()[0]
-        self.shape = np.int16(np.ceil(np.array(self.xmds.rio.shape) * self.resolution / self.kernel_size_side))
         self.max_vertical_difference = max_vertical_difference
         self.delta_theta = 2*np.pi/thetas
-        self.phis_angles = np.arcsin(np.arange(1/phis/2 + 1/phis, 1, 1/phis))
+        self.phis_angles = np.arcsin(np.arange(1/phis/2, 1, 1/phis))
         self.tangents = 1/np.tan(self.phis_angles) 
-        self.pad = np.ceil(self.kernel_size_side / 2 * np.sqrt(2)) - self.kernel_size_side / 2
-
-    ## TODO
-    # Assert PAD size and square rotation
-    # np.ceil(svf.pad_max() / (svf.downscales() * svf.resolution)), svf.downscales() * svf.resolution
+        self.pad_kernel = np.ceil(self.kernel_size_side / 2 * np.sqrt(2)) - self.kernel_size_side / 2
+        self.horizontal_distance = max(self.downscales() * self.resolution * self.kernel_size_side)
+        self.resolutions = np.unique(self.downscales() * self.resolution)
+        self.max_horizontal_distance = max_horizontal_distance
+        self.thetas = thetas # Must be divisible by 4
 
     def downscales(self):
         downscales = np.floor(self.tangents[::-1] * (1/self.resolution))
@@ -55,38 +56,48 @@ class SVF:
         return d_scales
 
     def pad_max(self) -> np.array:
-        pad_max = np.ceil((self.tangents[::-1] * self.max_vertical_difference))
-        return pad_max
+        pad_tangent = (self.tangents[::-1] * self.max_vertical_difference) / self.downscales()
+        pad_max = np.ceil(((self.kernel_size_side / 2) + pad_tangent) * np.sqrt(2) - (self.kernel_size_side / 2) + pad_tangent)
+        # Adding Max Distance
+        diff_to_horizon_max =  self.max_horizontal_distance / self.downscales()[-1] / self.resolution
+        if diff_to_horizon_max > pad_tangent[-1]:
+            pad_max[-1] = pad_max[-1] + diff_to_horizon_max - pad_tangent[-1]
+        return np.int16(pad_max)
 
-    def working_kernel(self, col, row, resolution):
+    def pad_max_by_resolution(self):
+        dict = {}
+        for a,b in zip (self.downscales() * self.resolution, self.pad_max()):
+            dict[a] = b
+        return dict
+
+    def working_kernel(self, row, col, resolution):
         # REtorna o kernel de trabalho com PAD
-        assert col <= tuple(self.shape)[0] - 1, f"Column must be <= than {tuple(self.shape)[0] - 1}"
-        assert row <= tuple(self.shape)[1] - 1, f"Row must be <= than {tuple(self.shape)[1] - 1}"
+        rows, cols = self.kernels(resolution)
+        assert row <= rows, f"Row must be <= than {rows}"
+        assert col <= cols, f"Column must be <= than {cols}"
 
         mds = self.get_downscale(resolution)
 
-        col_s = col * self.kernel_size_side / resolution
-        col_f = (col + 1) * (self.kernel_size_side) / resolution
+        col_s = col * self.kernel_size_side 
+        col_f = (col + 1) * (self.kernel_size_side) 
         
-        if col_f > mds.shape[1]:
-            col_f = mds.shape[1]
+        if col_f > mds.shape[2]:
+            col_f = mds.shape[2]
 
-        row_s = row * self.kernel_size_side  / resolution
-        row_f = (row + 1) * self.kernel_size_side  / resolution
+        row_s = row * self.kernel_size_side 
+        row_f = (row + 1) * self.kernel_size_side 
 
-        if row_f > mds.shape[2]:
-            row_f = mds.shape[2]
+        if row_f > mds.shape[1]:
+            row_f = mds.shape[1]
         
-        # w_kernel = ((int(col_s),int(col_f)), (int(row_s),int(row_f)))
-
-        pad_pixels = np.int16(np.ceil(self.pad / resolution))
-        # print(pad_pixels)
+        pad_pixels = self.pad_max_by_resolution()[resolution]
         
         col_s_padded = col_s - pad_pixels
         col_f_padded = col_f + pad_pixels
         row_s_padded = row_s - pad_pixels
         row_f_padded = row_f + pad_pixels
         
+
         pad_left, pad_right, pad_top, pad_bottom = 0, 0, 0, 0
 
         if col_s_padded < 0:
@@ -97,22 +108,91 @@ class SVF:
             pad_top = int(abs(row_s_padded))
             row_s_padded = 0
         
-        if col_f_padded > mds.shape[1]:
-            pad_right = int(col_f_padded - mds.shape[1])
-            col_f_padded = mds.shape[1]
+        if col_f_padded >= mds.shape[2]:
+            pad_right = int(col_f_padded - mds.shape[2])
+            col_f_padded = mds.shape[2] - 1
 
-        if row_f_padded > mds.shape[2]:
-            pad_bottom = int(row_f_padded - mds.shape[2])
-            row_f_padded = mds.shape[2]
+        if row_f_padded >= mds.shape[1]:
+            pad_bottom = int(row_f_padded - mds.shape[1])
+            row_f_padded = mds.shape[1] - 1
         
-        print((pad_left, pad_right), (pad_top, pad_bottom))
+        k_slice = (pad_left, pad_right), (pad_top, pad_bottom)
 
-        w_kernel_padded = mds[0, int(col_s_padded):int(col_f_padded), int(row_s_padded):int(row_f_padded)]
+        w_kernel_padded = mds[0, int(row_s_padded):int(row_f_padded), int(col_s_padded):int(col_f_padded)]
         w_kernel_padded = np.pad(w_kernel_padded, ((pad_left, pad_right), (pad_top, pad_bottom)), mode='constant', constant_values=np.nan)
         
-        return pad_pixels, w_kernel_padded
-        # mds[pad_pixels:-pad_pixels, pad_pixels:-pad_pixels]
+        return k_slice, w_kernel_padded
 
+    def kernels(self, resolution):
+        mds = self.get_downscale(resolution)
+
+        rows = mds.shape[1] // self.kernel_size_side
+        cols =  mds.shape[2] // self.kernel_size_side 
+
+        return rows, cols
+
+    def svf(self):
+        # for res in self.resolutions:
+        #     row, col = self.kernels(res)
+        #     for row in range(row + 1):
+        #         for col in range(col + 1):
+        #             print(col, row, res)
+        self._calc_svf(10, 10, 0.5)
+        return None
+
+
+    def _calc_svf(self, row, col, resolution):
+
+
+        ks, wk = self.working_kernel(row, col, resolution)
+
+        # Test if all values is nan
+        if np.all(np.isnan(wk)):
+            return None
+
+        tangs = self.tangents[::-1][np.where(self.downscales() * self.resolution == resolution)[0]]
+        print(len(tangs))
+
+        for i in np.linspace(0, np.pi/2, self.thetas//4, endpoint=False):
+
+            # PErformance ISSUE
+            if wk.shape[0] == wk.shape[1]:
+                mds_r = rotate_2d(wk, i)
+            else:
+                mds_r = ndimage.rotate(wk, np.rad2deg(i), reshape=False)
+
+            print(np.rad2deg(i))
+
+            # for q, t in np.array([[r, t] for r in range(4) for t in tangs]):
+            #     _calc_svf_quadrant(mds_r, q, t, resolution)
+            
+            ## MULTIPROCESSING OPTION
+            p_loop = np.array([[mds_r, r, t, resolution] for r in range(4) for t in tangs], dtype=object)
+            with Pool(12) as p:
+                svf_part = p.starmap(_calc_svf_quadrant, zip(p_loop[:, 0], p_loop[:, 1], p_loop[:, 2], p_loop[:, 3]))
+
+            # svf += rotate_2d(np.sum(np.array(svf_part), axis=0), -i)
+        return None
+    
+
+## TODO
+# Iterar sobre cada resolucao, da mais ampla para a mais restrita
+# Iterar sobre cada kernel
+# Gravar o resultado
+#
+# Agregar os resultados
+
+def _calc_svf_quadrant(mds, quadrant, tangent, resolution):
+    indices = np.indices(mds.shape)
+    # print(indices[1])
+    # MAking Projection
+    projection = np.rot90(mds, k=quadrant) * tangent + resolution * np.rot90(indices[1], k=quadrant)
+    # Accumulated Projection
+    projection_acc = np.maximum.accumulate(projection, axis=1)
+    # Calculating visibility
+    sky_is_visible = np.less_equal(projection_acc, projection)
+    # quadrant back
+    return np.rot90(sky_is_visible, k=-quadrant)
 
 def rotate_2d(matrix, angle):
     shape = matrix.shape
@@ -127,6 +207,8 @@ def rotate_2d(matrix, angle):
     xr = np.where(xr < 0, 0, xr)
     xr = np.where(xr > shape[0]-1, shape[0]-1, xr)
     yr = np.where(yr < 0, 0, yr)
-    yr = np.where(yr > shape[0]-1, shape[0]-1, yr)
+    yr = np.where(yr > shape[1]-1, shape[1]-1, yr)
 
     return matrix[yr, xr]
+
+    
