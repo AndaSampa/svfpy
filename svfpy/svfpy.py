@@ -140,9 +140,7 @@ class SVF:
         self._calc_svf(10, 10, 0.5)
         return None
 
-
     def _calc_svf(self, row, col, resolution):
-
 
         ks, wk = self.working_kernel(row, col, resolution)
 
@@ -174,13 +172,6 @@ class SVF:
             # svf += rotate_2d(np.sum(np.array(svf_part), axis=0), -i)
         return None
     
-
-## TODO
-# Iterar sobre cada resolucao, da mais ampla para a mais restrita
-# Iterar sobre cada kernel
-# Gravar o resultado
-#
-# Agregar os resultados
 
 def _calc_svf_quadrant(mds, quadrant, tangent, resolution):
     indices = np.indices(mds.shape)
