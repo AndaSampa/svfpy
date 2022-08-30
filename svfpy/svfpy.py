@@ -4,6 +4,8 @@ import os
 import tempfile
 from multiprocessing import Pool
 from scipy import ndimage
+import rasterio
+from rasterio.transform import Affine
 
 class SVF:
     def __init__(self,
@@ -20,6 +22,7 @@ class SVF:
         self.kernel_size_side = kernel_size_side
         self.downscales_path = downscales_path
         self.xmds = rioxarray.open_rasterio(mds_file)
+        self.profile = rasterio.open(mds_file).profile
         self.resolution = self.xmds.rio.resolution()[0]
         self.max_vertical_difference = max_vertical_difference
         self.delta_theta = 2*np.pi/thetas
@@ -121,7 +124,7 @@ class SVF:
         w_kernel_padded = mds[0, int(row_s_padded):int(row_f_padded), int(col_s_padded):int(col_f_padded)]
         w_kernel_padded = np.pad(w_kernel_padded, ((pad_left, pad_right), (pad_top, pad_bottom)), mode='constant', constant_values=np.nan)
         
-        return k_slice, w_kernel_padded
+        return mds, w_kernel_padded
 
     def kernels(self, resolution):
         mds = self.get_downscale(resolution)
@@ -132,24 +135,49 @@ class SVF:
         return rows, cols
 
     def svf(self):
-        # for res in self.resolutions:
-        #     row, col = self.kernels(res)
-        #     for row in range(row + 1):
-        #         for col in range(col + 1):
-        #             print(col, row, res)
-        self._calc_svf(10, 10, 0.5)
-        return None
+        for res in self.resolutions:
+            row, col = self.kernels(res)
+            for row in range(row + 1):
+                for col in range(col + 1):
+                    print(col, row, res)
+                    
+                    mds, svf = self._calc_svf(row, col, res)
+                    # sk, wk = self.working_kernel(row, col, res)
+                    # write file
+                    x = self.xmds.rio.bounds()[0]
+                    y = self.xmds.rio.bounds()[-1]
+                    transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row + 1) * self.kernel_size_side * res) * Affine.scale(res, res)
+                    profile = self.profile
+                    profile.update(
+                        transform=transform,
+                        height=svf.shape[0],
+                        width=svf.shape[1]
+                        # height=2500,
+                        # width=2500
+                    )
+                    ## TODO
+                    ## Convert to RioXArray
+                    ## https://github.com/corteva/rioxarray/discussions/430
+                    with rasterio.open(f'../tmp/{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
+                        svf_part_out.write(svf[::-1, :], 1)
+
+                    break
+                break
+            break
+        return svf
 
     def _calc_svf(self, row, col, resolution):
 
-        ks, wk = self.working_kernel(row, col, resolution)
+        mds, wk = self.working_kernel(row, col, resolution)
 
         # Test if all values is nan
         if np.all(np.isnan(wk)):
             return None
 
-        tangs = self.tangents[::-1][np.where(self.downscales() * self.resolution == resolution)[0]]
-        print(len(tangs))
+        tangs = self.tangents[::-1]#[np.where(self.downscales() * self.resolution == resolution)[0]]
+        pad = self.pad_max_by_resolution()[resolution]
+        svf = np.ones(wk[pad:-pad, pad:-pad].shape, dtype='int16')
+        # print(len(tangs))
 
         for i in np.linspace(0, np.pi/2, self.thetas//4, endpoint=False):
 
@@ -161,23 +189,26 @@ class SVF:
 
             print(np.rad2deg(i))
 
-            # for q, t in np.array([[r, t] for r in range(4) for t in tangs]):
-            #     _calc_svf_quadrant(mds_r, q, t, resolution)
+            svf_part = []
+            # for q in range(1):
+            # for q, t in np.array([[r, t] for r in range(2) for t in tangs]):
+            for t in tangs:
+                svf_part.append(_calc_svf_quadrant(mds_r, 0, t, resolution))
             
             ## MULTIPROCESSING OPTION
-            p_loop = np.array([[mds_r, r, t, resolution] for r in range(4) for t in tangs], dtype=object)
-            with Pool(12) as p:
-                svf_part = p.starmap(_calc_svf_quadrant, zip(p_loop[:, 0], p_loop[:, 1], p_loop[:, 2], p_loop[:, 3]))
+            # p_loop = np.array([[mds_r, r, t, resolution] for r in range(4) for t in tangs], dtype=object)
+            # with Pool(12) as p:
+            #     svf_part = p.starmap(_calc_svf_quadrant, zip(p_loop[:, 0], p_loop[:, 1], p_loop[:, 2], p_loop[:, 3]))
 
-            # svf += rotate_2d(np.sum(np.array(svf_part), axis=0), -i)
-        return None
+            svf += rotate_2d(np.sum(np.array(svf_part), axis=0), -i)[pad:-pad, pad:-pad]
+        return mds, svf
     
 
 def _calc_svf_quadrant(mds, quadrant, tangent, resolution):
     indices = np.indices(mds.shape)
     # print(indices[1])
     # MAking Projection
-    projection = np.rot90(mds, k=quadrant) * tangent + resolution * np.rot90(indices[1], k=quadrant)
+    projection = np.rot90(mds, k=quadrant) * tangent + resolution * indices[1]
     # Accumulated Projection
     projection_acc = np.maximum.accumulate(projection, axis=1)
     # Calculating visibility
