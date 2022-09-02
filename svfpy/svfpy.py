@@ -119,12 +119,12 @@ class SVF:
             pad_bottom = int(row_f_padded - mds.shape[1])
             row_f_padded = mds.shape[1] - 1
         
-        k_slice = (pad_left, pad_right), (pad_top, pad_bottom)
+        k_slice = (pad_left, pad_right), (pad_top, pad_bottom), (row_s_padded), (row_f_padded), (col_s_padded), (col_f_padded)
 
         w_kernel_padded = mds[0, int(row_s_padded):int(row_f_padded), int(col_s_padded):int(col_f_padded)]
-        w_kernel_padded = np.pad(w_kernel_padded, ((pad_left, pad_right), (pad_top, pad_bottom)), mode='constant', constant_values=np.nan)
+        w_kernel_padded = np.pad(w_kernel_padded, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
         
-        return mds, w_kernel_padded
+        return k_slice, w_kernel_padded
 
     def kernels(self, resolution):
         mds = self.get_downscale(resolution)
@@ -139,42 +139,49 @@ class SVF:
             row, col = self.kernels(res)
             for row in range(row + 1):
                 for col in range(col + 1):
-                    print(col, row, res)
                     
-                    mds, svf = self._calc_svf(row, col, res)
-                    # sk, wk = self.working_kernel(row, col, res)
-                    # write file
-                    x = self.xmds.rio.bounds()[0]
-                    y = self.xmds.rio.bounds()[-1]
-                    transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row + 1) * self.kernel_size_side * res) * Affine.scale(res, res)
-                    profile = self.profile
-                    profile.update(
-                        transform=transform,
-                        height=svf.shape[0],
-                        width=svf.shape[1]
-                        # height=2500,
-                        # width=2500
-                    )
-                    ## TODO
-                    ## Convert to RioXArray
-                    ## https://github.com/corteva/rioxarray/discussions/430
-                    with rasterio.open(f'../tmp/{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
-                        svf_part_out.write(svf[::-1, :], 1)
+                    self.svf_kernel(row, col, res)
 
                     break
                 break
             break
         return svf
 
+    def svf_kernel(self, row, col, res):
+
+        print(col, row, res)
+        
+        mds, svf = self._calc_svf(row, col, res)
+        # sk, wk = self.working_kernel(row, col, res)
+        # write file
+        x = self.xmds.rio.bounds()[0]
+        y = self.xmds.rio.bounds()[-1]
+        transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row + 1) * self.kernel_size_side * res) * Affine.scale(res, res)
+        profile = self.profile
+        profile.update(
+            transform=transform,
+            height=svf.shape[0],
+            width=svf.shape[1]
+            # height=2500,
+            # width=2500
+        )
+        ## TODO
+        ## Convert to RioXArray
+        ## https://github.com/corteva/rioxarray/discussions/430
+        with rasterio.open(f'../tmp/{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
+            svf_part_out.write(svf[::-1, :], 1)
+
+        return svf
+
     def _calc_svf(self, row, col, resolution):
 
         mds, wk = self.working_kernel(row, col, resolution)
-
+        wk = np.nan_to_num(wk)
         # Test if all values is nan
         if np.all(np.isnan(wk)):
             return None
 
-        tangs = self.tangents[::-1]#[np.where(self.downscales() * self.resolution == resolution)[0]]
+        tangs = self.tangents[::-1][np.where(self.downscales() * self.resolution == resolution)[0]]
         pad = self.pad_max_by_resolution()[resolution]
         svf = np.ones(wk[pad:-pad, pad:-pad].shape, dtype='int16')
         # print(len(tangs))
@@ -191,9 +198,9 @@ class SVF:
 
             svf_part = []
             # for q in range(1):
-            # for q, t in np.array([[r, t] for r in range(2) for t in tangs]):
-            for t in tangs:
-                svf_part.append(_calc_svf_quadrant(mds_r, 0, t, resolution))
+            for q, t in np.array([[r, t] for r in range(4) for t in tangs]):
+            # for t in tangs:
+                svf_part.append(_calc_svf_quadrant(mds_r, q, t, resolution))
             
             ## MULTIPROCESSING OPTION
             # p_loop = np.array([[mds_r, r, t, resolution] for r in range(4) for t in tangs], dtype=object)
