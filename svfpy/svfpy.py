@@ -47,7 +47,7 @@ class SVF:
         else:            
             mds_downscale = self.downscales_path + os.path.basename(self.mds_file).split('.')[0] + f'_{int(resolution * 100)}cm_' + '.tif'
             if not os.path.exists(mds_downscale) or force:
-                os.system(f'gdalwarp -tr {resolution} {resolution} -r average -of GTiff -overwrite {self.mds_file} {mds_downscale}')
+                os.system(f'gdalwarp -tr {resolution} {resolution} -r mode -of GTiff -overwrite {self.mds_file} {mds_downscale}')
             mds = rioxarray.open_rasterio(mds_downscale)
         return mds
 
@@ -83,15 +83,8 @@ class SVF:
 
         col_s = col * self.kernel_size_side 
         col_f = (col + 1) * (self.kernel_size_side) 
-        
-        if col_f > mds.shape[2]:
-            col_f = mds.shape[2]
-
         row_s = row * self.kernel_size_side 
         row_f = (row + 1) * self.kernel_size_side 
-
-        if row_f > mds.shape[1]:
-            row_f = mds.shape[1]
         
         pad_pixels = self.pad_max_by_resolution()[resolution]
         
@@ -100,7 +93,6 @@ class SVF:
         row_s_padded = row_s - pad_pixels
         row_f_padded = row_f + pad_pixels
         
-
         pad_left, pad_right, pad_top, pad_bottom = 0, 0, 0, 0
 
         if col_s_padded < 0:
@@ -113,11 +105,11 @@ class SVF:
         
         if col_f_padded >= mds.shape[2]:
             pad_right = int(col_f_padded - mds.shape[2])
-            col_f_padded = mds.shape[2] - 1
+            col_f_padded = mds.shape[2]# - 1
 
         if row_f_padded >= mds.shape[1]:
             pad_bottom = int(row_f_padded - mds.shape[1])
-            row_f_padded = mds.shape[1] - 1
+            row_f_padded = mds.shape[1]# - 1
         
         k_slice = (pad_left, pad_right), (pad_top, pad_bottom), (row_s_padded), (row_f_padded), (col_s_padded), (col_f_padded)
 
@@ -139,13 +131,12 @@ class SVF:
             row, col = self.kernels(res)
             for row in range(row + 1):
                 for col in range(col + 1):
-                    
                     self.svf_kernel(row, col, res)
 
-                    break
-                break
-            break
-        return svf
+            #         break
+            #     break
+            # break
+        return None
 
     def svf_kernel(self, row, col, res):
 
@@ -194,7 +185,7 @@ class SVF:
             else:
                 mds_r = ndimage.rotate(wk, np.rad2deg(i), reshape=False)
 
-            print(np.rad2deg(i))
+            # print(np.rad2deg(i))
 
             svf_part = []
             # for q in range(1):
