@@ -13,3 +13,4 @@ pyproj
 numba
 dask[complete]  
 matplotlib
+geopandas

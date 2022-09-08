@@ -1,3 +1,4 @@
+from time import thread_time
 import rioxarray
 import numpy as np
 import os
@@ -6,6 +7,9 @@ from multiprocessing import Pool
 from scipy import ndimage
 import rasterio
 from rasterio.transform import Affine
+import glob
+from rioxarray import merge
+from scipy import ndimage
 
 class SVF:
     def __init__(self,
@@ -16,7 +20,8 @@ class SVF:
                 phis = 8, 
                 observer_height = 1.5,
                 max_horizontal_distance = 10000,
-                max_vertical_difference = 180):
+                max_vertical_difference = 180,
+                tmp_folder = None):
         
         self.mds_file = mds_file
         self.kernel_size_side = kernel_size_side
@@ -33,6 +38,8 @@ class SVF:
         self.resolutions = np.unique(self.downscales() * self.resolution)
         self.max_horizontal_distance = max_horizontal_distance
         self.thetas = thetas # Must be divisible by 4
+        self.tmp_folder = self._set_tmp_folder(tmp_folder)
+        self.observer_height = observer_height
 
     def downscales(self):
         downscales = np.floor(self.tangents[::-1] * (1/self.resolution))
@@ -133,9 +140,8 @@ class SVF:
                 for col in range(col + 1):
                     self.svf_kernel(row, col, res)
 
-            #         break
-            #     break
-            # break
+        self._agg_scale(res)
+        self._agg_all()    
         return None
 
     def svf_kernel(self, row, col, res):
@@ -147,7 +153,7 @@ class SVF:
         # write file
         x = self.xmds.rio.bounds()[0]
         y = self.xmds.rio.bounds()[-1]
-        transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row + 1) * self.kernel_size_side * res) * Affine.scale(res, res)
+        transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row) * self.kernel_size_side * res) * Affine.scale(res, -res)
         profile = self.profile
         profile.update(
             transform=transform,
@@ -159,10 +165,71 @@ class SVF:
         ## TODO
         ## Convert to RioXArray
         ## https://github.com/corteva/rioxarray/discussions/430
-        with rasterio.open(f'../tmp/{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
-            svf_part_out.write(svf[::-1, :], 1)
+        with rasterio.open(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
+            svf_part_out.write(svf, 1)
 
         return svf
+
+    def _agg_scale(self, resolution):
+        files = glob.glob(f'{self.tmp_folder}*_*_{resolution}_temptest.tiff')
+        rasters = []
+        # downscale = int(self.downscales()[np.where(self.resolutions == resolution)[0][0]])
+        downscale = int(resolution / self.resolution)
+
+        for f in files:
+            r = rioxarray.open_rasterio(f, engine="rasterio", chunks=True, masked=True)
+            rasters.append(r)
+
+        x_svf = merge.merge_arrays(rasters, method='sum')[0]
+
+        profile = self.profile
+
+        x_svf_height = int(np.ceil(profile['height'] / downscale))
+        x_svf_width = int(np.ceil(profile['width'] / downscale))
+        x_svf = x_svf[0:x_svf_height, 0:x_svf_width]
+        
+        if downscale > 1:
+            x_svf = zoom2d(x_svf.values, downscale)
+            # TODO - aplicar filtro
+            # x_svf = ndimage.median_filter(x_svf, size=downscale//2)
+
+        x_svf[0:profile['height'], 0:profile['width']]
+        
+        with rasterio.open(f'{self.tmp_folder}all_{resolution}_temptest.tiff', 'w', **profile) as x_svf_output:
+            x_svf_output.write(x_svf, 1)
+
+        return None
+
+    def _agg_all(self):
+        svfs = glob.glob(f'{self.tmp_folder}all_*_temptest.tiff')
+        rasters = []
+        for s in svfs:
+            rasters.append(rioxarray.open_rasterio(s, engine="rasterio", chunks=True, masked=True))
+        xmds = merge.merge_arrays(rasters, res=(0.5, 0.5), method='sum')
+        xmds.rio.to_raster(f'{self.tmp_folder}all_temptest.tiff')
+        return None
+
+    def calc_svf_point(self, row:int, col:int):
+        mds = self.xmds
+        row_idx, col_idx = np.indices(mds[0].shape)
+        row_idx -= row
+        col_idx -= col
+        theta_angles = np.arctan2(row_idx, col_idx) + np.pi
+        distances = np.hypot(row_idx, col_idx)
+        # deltas =  mds[0] - (mds[0, row, col] + self.observer_height)
+        deltas =  mds[0] - (mds[0, row, col])
+        phi_angles = np.nan_to_num(np.arctan2(deltas, distances))
+        phi_angles[phi_angles < 0] = 0.
+        svf = 0.
+        angles = 0
+        for a in np.linspace(0, 2*np.pi, self.thetas, endpoint=False):
+            mask = np.logical_and((theta_angles >= a), (theta_angles < (a + self.delta_theta)))
+            if len(phi_angles[mask]) > 0:
+                angles += 1
+                svf += (1. - np.sin(np.max(phi_angles[mask]))) #/ self.thetas
+        return svf / angles
+        # return mask 
+
 
     def _calc_svf(self, row, col, resolution):
 
@@ -200,7 +267,13 @@ class SVF:
 
             svf += rotate_2d(np.sum(np.array(svf_part), axis=0), -i)[pad:-pad, pad:-pad]
         return mds, svf
-    
+
+    def _set_tmp_folder(self, tmp_folder):
+        if tmp_folder is None:
+            # TODO - Set Env Temp Folder
+            return '../tmp/'
+        else:
+            return tmp_folder
 
 def _calc_svf_quadrant(mds, quadrant, tangent, resolution):
     indices = np.indices(mds.shape)
@@ -230,5 +303,27 @@ def rotate_2d(matrix, angle):
     yr = np.where(yr > shape[1]-1, shape[1]-1, yr)
 
     return matrix[yr, xr]
+
+def zoom2d(matrix, times:int):
+  shape  = matrix.shape
+  dims = len(shape)
+
+  matrix_zomed = \
+  np.tile(
+    np.expand_dims(
+      np.tile(
+        np.expand_dims(matrix, axis=2),
+        tuple(np.concatenate([np.array([1,1, times]), np.ones(dims-2, dtype='int')]))
+      ).reshape(
+        tuple(np.array(shape) * np.concatenate([np.array([1,times]), np.ones(dims-2, dtype='int')]))
+      ),
+      axis=1
+    ),
+    tuple(np.concatenate([np.array([1,times]), np.ones(dims-1, dtype='int')]))
+  ).reshape(
+    tuple(np.array(shape) * np.concatenate([np.array([times,times]), np.ones(dims-2, dtype='int')]))
+  )
+  
+  return matrix_zomed
 
     
