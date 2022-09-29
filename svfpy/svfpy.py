@@ -1,4 +1,5 @@
-from time import thread_time
+from bz2 import compress
+from cmath import nan
 import rioxarray
 import numpy as np
 import os
@@ -27,6 +28,7 @@ class SVF:
         self.kernel_size_side = kernel_size_side
         self.downscales_path = downscales_path
         self.xmds = rioxarray.open_rasterio(mds_file)
+        self.xmds0 = self.xmds[0]
         self.profile = rasterio.open(mds_file).profile
         self.resolution = self.xmds.rio.resolution()[0]
         self.max_vertical_difference = max_vertical_difference
@@ -121,7 +123,7 @@ class SVF:
         k_slice = (pad_left, pad_right), (pad_top, pad_bottom), (row_s_padded), (row_f_padded), (col_s_padded), (col_f_padded)
 
         w_kernel_padded = mds[0, int(row_s_padded):int(row_f_padded), int(col_s_padded):int(col_f_padded)]
-        w_kernel_padded = np.pad(w_kernel_padded, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=0)
+        w_kernel_padded = np.pad(w_kernel_padded, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=nan)
         
         return k_slice, w_kernel_padded
 
@@ -140,33 +142,38 @@ class SVF:
                 for col in range(col + 1):
                     self.svf_kernel(row, col, res)
 
-        self._agg_scale(res)
-        self._agg_all()    
+            print(f'Agregando {res}')
+            self._agg_scale(res)
+        # self._agg_all()    
         return None
 
     def svf_kernel(self, row, col, res):
 
-        print(col, row, res)
+        print(row, col, res)
         
         mds, svf = self._calc_svf(row, col, res)
         # sk, wk = self.working_kernel(row, col, res)
         # write file
-        x = self.xmds.rio.bounds()[0]
-        y = self.xmds.rio.bounds()[-1]
-        transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row) * self.kernel_size_side * res) * Affine.scale(res, -res)
-        profile = self.profile
-        profile.update(
-            transform=transform,
-            height=svf.shape[0],
-            width=svf.shape[1]
-            # height=2500,
-            # width=2500
-        )
-        ## TODO
-        ## Convert to RioXArray
-        ## https://github.com/corteva/rioxarray/discussions/430
-        with rasterio.open(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
-            svf_part_out.write(svf, 1)
+        if not np.all(svf == 0.): 
+            x = self.xmds.rio.bounds()[0]
+            y = self.xmds.rio.bounds()[-1]
+            transform = Affine.translation(x + col * self.kernel_size_side * res, y - (row) * self.kernel_size_side * res) * Affine.scale(res, -res)
+            profile = self.profile
+            profile.update(
+                transform=transform,
+                height=svf.shape[0],
+                width=svf.shape[1]
+                # height=2500,
+                # width=2500
+            )
+
+            profile.update(compress='lzw')
+
+            ## TODO
+            ## Convert to RioXArray
+            ## https://github.com/corteva/rioxarray/discussions/430
+            with rasterio.open(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
+                svf_part_out.write(svf, 1)
 
         return svf
 
@@ -181,7 +188,7 @@ class SVF:
             rasters.append(r)
 
         x_svf = merge.merge_arrays(rasters, method='sum')[0]
-
+        print(downscale, x_svf.shape)
         profile = self.profile
 
         x_svf_height = int(np.ceil(profile['height'] / downscale))
@@ -194,6 +201,8 @@ class SVF:
             # x_svf = ndimage.median_filter(x_svf, size=downscale//2)
 
         x_svf[0:profile['height'], 0:profile['width']]
+
+        profile.update(compress='lzw')
         
         with rasterio.open(f'{self.tmp_folder}all_{resolution}_temptest.tiff', 'w', **profile) as x_svf_output:
             x_svf_output.write(x_svf, 1)
@@ -206,18 +215,18 @@ class SVF:
         for s in svfs:
             rasters.append(rioxarray.open_rasterio(s, engine="rasterio", chunks=True, masked=True))
         xmds = merge.merge_arrays(rasters, res=(0.5, 0.5), method='sum')
-        xmds.rio.to_raster(f'{self.tmp_folder}all_temptest.tiff')
+        xmds.rio.to_raster(f'{self.tmp_folder}all_temptest.tiff', compress='lzw')
         return None
 
     def calc_svf_point(self, row:int, col:int):
-        mds = self.xmds
-        row_idx, col_idx = np.indices(mds[0].shape)
+        # mds = self.xmds
+        row_idx, col_idx = np.indices(self.xmds0.shape)
         row_idx -= row
         col_idx -= col
         theta_angles = np.arctan2(row_idx, col_idx) + np.pi
         distances = np.hypot(row_idx, col_idx)
-        # deltas =  mds[0] - (mds[0, row, col] + self.observer_height)
-        deltas =  mds[0] - (mds[0, row, col])
+        # deltas =  self.xmds0 - (self.xmds0[0, row, col] + self.observer_height)
+        deltas =  self.xmds0 - (self.xmds0[row, col])
         phi_angles = np.nan_to_num(np.arctan2(deltas, distances))
         phi_angles[phi_angles < 0] = 0.
         svf = 0.
@@ -234,15 +243,17 @@ class SVF:
     def _calc_svf(self, row, col, resolution):
 
         mds, wk = self.working_kernel(row, col, resolution)
+
         wk = np.nan_to_num(wk)
-        # Test if all values is nan
-        if np.all(np.isnan(wk)):
-            return None
 
         tangs = self.tangents[::-1][np.where(self.downscales() * self.resolution == resolution)[0]]
         pad = self.pad_max_by_resolution()[resolution]
         svf = np.ones(wk[pad:-pad, pad:-pad].shape, dtype='int16')
         # print(len(tangs))
+
+        # Test if all values is nan
+        if np.all(wk == 0.):
+            return None, wk
 
         for i in np.linspace(0, np.pi/2, self.thetas//4, endpoint=False):
 
@@ -256,14 +267,13 @@ class SVF:
 
             svf_part = []
             # for q in range(1):
-            for q, t in np.array([[r, t] for r in range(4) for t in tangs]):
-            # for t in tangs:
-                svf_part.append(_calc_svf_quadrant(mds_r, q, t, resolution))
+            # for q, t in np.array([[r, t] for r in range(4) for t in tangs]):
+            #     svf_part.append(_calc_svf_quadrant(mds_r, q, t, resolution))
             
             ## MULTIPROCESSING OPTION
-            # p_loop = np.array([[mds_r, r, t, resolution] for r in range(4) for t in tangs], dtype=object)
-            # with Pool(12) as p:
-            #     svf_part = p.starmap(_calc_svf_quadrant, zip(p_loop[:, 0], p_loop[:, 1], p_loop[:, 2], p_loop[:, 3]))
+            p_loop = np.array([[mds_r, r, t, resolution] for r in range(4) for t in tangs], dtype=object)
+            with Pool(12) as p:
+                svf_part = p.starmap(_calc_svf_quadrant, zip(p_loop[:, 0], p_loop[:, 1], p_loop[:, 2], p_loop[:, 3]))
 
             svf += rotate_2d(np.sum(np.array(svf_part), axis=0), -i)[pad:-pad, pad:-pad]
         return mds, svf
