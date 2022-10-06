@@ -11,6 +11,7 @@ from rasterio.transform import Affine
 import glob
 from rioxarray import merge
 from scipy import ndimage
+import string
 
 class SVF:
     def __init__(self,
@@ -56,7 +57,7 @@ class SVF:
         else:            
             mds_downscale = self.downscales_path + os.path.basename(self.mds_file).split('.')[0] + f'_{int(resolution * 100)}cm_' + '.tif'
             if not os.path.exists(mds_downscale) or force:
-                os.system(f'gdalwarp -tr {resolution} {resolution} -r mode -of GTiff -overwrite {self.mds_file} {mds_downscale}')
+                os.system(f'gdal_translate -tr {resolution} {resolution} -r mode -of GTiff {self.mds_file} {mds_downscale}')
             mds = rioxarray.open_rasterio(mds_downscale)
         return mds
 
@@ -140,7 +141,8 @@ class SVF:
             row, col = self.kernels(res)
             for row in range(row + 1):
                 for col in range(col + 1):
-                    self.svf_kernel(row, col, res)
+                    if not os.path.exists(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff'):
+                        self.svf_kernel(row, col, res)
 
             print(f'Agregando {res}')
             self._agg_scale(res)
@@ -177,46 +179,33 @@ class SVF:
 
         return svf
 
+
     def _agg_scale(self, resolution):
-        files = glob.glob(f'{self.tmp_folder}*_*_{resolution}_temptest.tiff')
-        rasters = []
-        # downscale = int(self.downscales()[np.where(self.resolutions == resolution)[0][0]])
-        downscale = int(resolution / self.resolution)
-
-        for f in files:
-            r = rioxarray.open_rasterio(f, engine="rasterio", chunks=True, masked=True)
-            rasters.append(r)
-
-        x_svf = merge.merge_arrays(rasters, method='sum')[0]
-        print(downscale, x_svf.shape)
-        profile = self.profile
-
-        x_svf_height = int(np.ceil(profile['height'] / downscale))
-        x_svf_width = int(np.ceil(profile['width'] / downscale))
-        x_svf = x_svf[0:x_svf_height, 0:x_svf_width]
+        vrt_file = f'{self.tmp_folder}all_{resolution}_temptest.vrt'
+        passes = len(np.where(self.downscales() * self.resolution == resolution)[0])
+        max_value = 1 + (passes * self.thetas)
+        bounds = self.xmds.rio.bounds()
+        projwin = ' '.join([str(bounds[0]), str(bounds[3]), str(bounds[2]), str(bounds[1])])
         
-        if downscale > 1:
-            x_svf = zoom2d(x_svf.values, downscale)
-            # TODO - aplicar filtro
-            # x_svf = ndimage.median_filter(x_svf, size=downscale//2)
-
-        x_svf[0:profile['height'], 0:profile['width']]
-
-        profile.update(compress='lzw')
+        os.system(f'gdalbuildvrt -srcnodata -9999 -vrtnodata {max_value} {vrt_file} {self.tmp_folder}*_{resolution}_temptest.tiff')
+        os.system(f'gdal_translate -tr {self.resolution} {self.resolution} -r average -a_nodata {max_value} -projwin {projwin} {vrt_file} {self.tmp_folder}all_{resolution}_upscaled_{self.resolution}.tiff -co "COMPRESS=ZSTD" -co "PREDICTOR=3" -co "BIGTIFF=YES"')
         
-        with rasterio.open(f'{self.tmp_folder}all_{resolution}_temptest.tiff', 'w', **profile) as x_svf_output:
-            x_svf_output.write(x_svf, 1)
-
         return None
 
     def _agg_all(self):
-        svfs = glob.glob(f'{self.tmp_folder}all_*_temptest.tiff')
-        rasters = []
-        for s in svfs:
-            rasters.append(rioxarray.open_rasterio(s, engine="rasterio", chunks=True, masked=True))
-        xmds = merge.merge_arrays(rasters, res=(0.5, 0.5), method='sum')
-        xmds.rio.to_raster(f'{self.tmp_folder}all_temptest.tiff', compress='lzw')
-        return None
+        files = [f'{self.tmp_folder}all_{resolution}_upscaled_0.5.tiff' for resolution  in self.resolutions]
+        letters = [letter for letter in string.ascii_uppercase[0:len(files)]]
+        files_argument = " ".join([f'-{l} {i}' for l, i in zip(letters, files)])
+        calc = '+'.join(letters)
+        command_line = f'gdal_calc.py {files_argument} --outfile=svf_all.tiff --calc="{calc}" --quiet --overwrite --hideNoData --NoDataValue=-9999 --co="COMPRESS=ZSTD" --co="PREDICTOR=3" --co="BIGTIFF=YES" --extent=intersect'
+        
+        # svfs = glob.glob(f'{self.tmp_folder}all_*_temptest.tiff')
+        # rasters = []
+        # for s in svfs:
+        #     rasters.append(rioxarray.open_rasterio(s, engine="rasterio", chunks=True, masked=True))
+        # xmds = merge.merge_arrays(rasters, res=(0.5, 0.5), method='sum')
+        # xmds.rio.to_raster(f'{self.tmp_folder}all_temptest.tiff', compress='lzw')
+        return command_line
 
     def calc_svf_point(self, row:int, col:int):
         # mds = self.xmds
