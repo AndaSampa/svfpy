@@ -1,5 +1,6 @@
 from bz2 import compress
 from cmath import nan
+from rasterio.windows import transform
 import rioxarray
 import numpy as np
 import os
@@ -12,6 +13,8 @@ import glob
 from rioxarray import merge
 from scipy import ndimage
 import string
+from shapely.geometry import box
+import geopandas as gpd
 
 class SVF:
     def __init__(self,
@@ -23,7 +26,8 @@ class SVF:
                 observer_height = 1.5,
                 max_horizontal_distance = 10000,
                 max_vertical_difference = 180,
-                tmp_folder = None):
+                tmp_folder = None,
+                boundary = None):
         
         self.mds_file = mds_file
         self.kernel_size_side = kernel_size_side
@@ -43,6 +47,7 @@ class SVF:
         self.thetas = thetas # Must be divisible by 4
         self.tmp_folder = self._set_tmp_folder(tmp_folder)
         self.observer_height = observer_height
+        self.boundary = self._set_boundary(boundary)
 
     def downscales(self):
         downscales = np.floor(self.tangents[::-1] * (1/self.resolution))
@@ -83,19 +88,34 @@ class SVF:
             dict[a] = b
         return dict
 
-    def working_kernel(self, row, col, resolution):
-        # REtorna o kernel de trabalho com PAD
+    def _col_row(self, row, col, resolution):
         rows, cols = self.kernels(resolution)
         assert row <= rows, f"Row must be <= than {rows}"
         assert col <= cols, f"Column must be <= than {cols}"
-
-        mds = self.get_downscale(resolution)
 
         col_s = col * self.kernel_size_side 
         col_f = (col + 1) * (self.kernel_size_side) 
         row_s = row * self.kernel_size_side 
         row_f = (row + 1) * self.kernel_size_side 
-        
+
+        return col_s, col_f, row_s, row_f
+
+    def _wk_bbox(self, row, col, resolution):
+        col_s, col_f, row_s, row_f = self._col_row(row, col, resolution)
+        transform = self.get_downscale(resolution).rio.transform()
+        pad_pixels = self.pad_max_by_resolution()[resolution]
+
+        x_min, y_min = transform * (col_s - pad_pixels, row_s - pad_pixels)
+        x_max, y_max = transform * (col_f + pad_pixels, row_f + pad_pixels)
+
+        return box(x_min, y_min, x_max, y_max)
+
+
+    def _k_slice(self, row, col, resolution):
+
+        col_s, col_f, row_s, row_f = self._col_row(row, col, resolution)
+        mds = self.get_downscale(resolution)
+
         pad_pixels = self.pad_max_by_resolution()[resolution]
         
         col_s_padded = col_s - pad_pixels
@@ -121,7 +141,14 @@ class SVF:
             pad_bottom = int(row_f_padded - mds.shape[1])
             row_f_padded = mds.shape[1]# - 1
         
-        k_slice = (pad_left, pad_right), (pad_top, pad_bottom), (row_s_padded), (row_f_padded), (col_s_padded), (col_f_padded)
+        return (pad_left, pad_right), (pad_top, pad_bottom), (row_s_padded), (row_f_padded), (col_s_padded), (col_f_padded)
+
+
+    def working_kernel(self, row, col, resolution):
+        # REtorna o kernel de trabalho com PAD
+        k_slice = self._k_slice(row, col, resolution)
+        (pad_left, pad_right), (pad_top, pad_bottom), (row_s_padded), (row_f_padded), (col_s_padded), (col_f_padded) = k_slice
+        mds = self.get_downscale(resolution)
 
         w_kernel_padded = mds[0, int(row_s_padded):int(row_f_padded), int(col_s_padded):int(col_f_padded)]
         w_kernel_padded = np.pad(w_kernel_padded, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant', constant_values=nan)
@@ -141,7 +168,7 @@ class SVF:
             row, col = self.kernels(res)
             for row in range(row + 1):
                 for col in range(col + 1):
-                    if not os.path.exists(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff'):
+                    if not os.path.exists(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff') and self._wk_bbox(row, col, res).intersects(self.boundary):
                         self.svf_kernel(row, col, res)
 
             print(f'Agregando {res}')
@@ -177,7 +204,7 @@ class SVF:
             with rasterio.open(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff', 'w', **profile) as svf_part_out:
                 svf_part_out.write(svf, 1)
 
-        return svf
+        return None
 
 
     def _agg_scale(self, resolution):
@@ -241,8 +268,9 @@ class SVF:
         # print(len(tangs))
 
         # Test if all values is nan
-        if np.all(wk == 0.):
-            return None, wk
+        if np.all((wk == 0.) | (wk == self.xmds.rio.nodata)):
+            # return None, wk
+            return None, np.zeros(wk[pad:-pad, pad:-pad].shape, dtype='int16')
 
         for i in np.linspace(0, np.pi/2, self.thetas//4, endpoint=False):
 
@@ -273,6 +301,12 @@ class SVF:
             return '../tmp/'
         else:
             return tmp_folder
+
+    def _set_boundary(self, boundary):
+        if boundary:
+            return gpd.read_file(boundary).dissolve().geometry[0]
+        else:
+            return None
 
 def _calc_svf_quadrant(mds, quadrant, tangent, resolution):
     indices = np.indices(mds.shape)
