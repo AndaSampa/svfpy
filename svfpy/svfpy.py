@@ -27,8 +27,12 @@ class SVF:
                 max_horizontal_distance = 10000,
                 max_vertical_difference = 180,
                 tmp_folder = None,
-                boundary = None):
+                boundary = None,
+                multiplier = 1,
+                unit = 'cm',
+                ):
         
+        self.multiplier = multiplier
         self.mds_file = mds_file
         self.kernel_size_side = kernel_size_side
         self.downscales_path = downscales_path
@@ -48,9 +52,10 @@ class SVF:
         self.tmp_folder = self._set_tmp_folder(tmp_folder)
         self.observer_height = observer_height
         self.boundary = self._set_boundary(boundary)
+        self.unit = unit
 
     def downscales(self):
-        downscales = np.floor(self.tangents[::-1] * (1/self.resolution))
+        downscales = np.floor(self.tangents[::-1] * (1/(self.resolution * self.multiplier)))
         downscales = np.where(downscales == 0, 1, downscales)
         return downscales
 
@@ -60,7 +65,7 @@ class SVF:
         if resolution == self.resolution:
             mds = self.xmds
         else:            
-            mds_downscale = self.downscales_path + os.path.basename(self.mds_file).split('.')[0] + f'_{int(resolution * 100)}cm_' + '.tif'
+            mds_downscale = self.downscales_path + os.path.basename(self.mds_file).split('.')[0] + f'_{int(resolution * 100)}{self.unit}_' + '.tif'
             if not os.path.exists(mds_downscale) or force:
                 os.system(f'gdal_translate -tr {resolution} {resolution} -r mode -of GTiff {self.mds_file} {mds_downscale}')
             mds = rioxarray.open_rasterio(mds_downscale)
@@ -180,11 +185,12 @@ class SVF:
     def svf(self):
 
         for res in self.resolutions:
-            # row, col = self.kernels(res)
-            # for row in range(row + 1):
-            #     for col in range(col + 1):
-            #         if not os.path.exists(f'{self.tmp_folder}{row}_{col}_{res}_temptest.tiff') and self._wk_bbox(row, col, res).intersects(self.boundary):
-            #             self.svf_kernel(row, col, res)
+            row, col = self.kernels(res)
+            print(f'************ RESOLUTION: {res}')
+            for row in range(row + 1):
+                for col in range(col + 1):
+                    if not os.path.exists(f'{self.tmp_folder}{row}_{col}_{res}_temp.tiff') and self._wk_bbox(row, col, res).intersects(self.boundary):
+                        self.svf_kernel(row, col, res)
 
             print(f'Agregando {res}')
             self._agg_scale(res)
@@ -235,7 +241,7 @@ class SVF:
         return None
 
     def _agg_all(self):
-        files = [f'{self.tmp_folder}all_{resolution}_upscaled_0.5.tiff' for resolution  in self.resolutions]
+        files = [f'{self.tmp_folder}all_{resolution}_upscaled_{self.resolution}.tiff' for resolution  in self.resolutions]
         letters = [letter for letter in string.ascii_uppercase[0:len(files)]]
         files_argument = " ".join([f'-{l} {i}' for l, i in zip(letters, files)])
         calc = '+'.join(letters)
@@ -250,25 +256,36 @@ class SVF:
         return command_line
 
     def calc_svf_point(self, row:int, col:int):
-        # mds = self.xmds
-        row_idx, col_idx = np.indices(self.xmds0.shape)
-        row_idx -= row
-        col_idx -= col
+        
+        xmin = col - self.max_horizontal_distance
+        if xmin < 0: xmin = 0 
+        x = col - xmin
+        xmax = col + self.max_horizontal_distance + 1
+        if xmax > self.xmds.rio.width: xmax = self.xmds.rio.width
+
+        ymin = row - self.max_horizontal_distance
+        if ymin < 0: ymin = 0
+        y = row - ymin
+        ymax = row + self.max_horizontal_distance + 1
+        if ymax > self.xmds.rio.height: ymax = self.xmds.rio.height 
+
+        mds = self.xmds[0, ymin:ymax, xmin:xmax]
+
+        row_idx, col_idx = np.indices((ymax - ymin, xmax - xmin))
+        col_idx -= x
+        row_idx -= y
         theta_angles = np.arctan2(row_idx, col_idx) + np.pi
-        distances = np.hypot(row_idx, col_idx)
-        # deltas =  self.xmds0 - (self.xmds0[0, row, col] + self.observer_height)
-        deltas =  self.xmds0 - (self.xmds0[row, col])
+        distances = np.hypot(row_idx * self.resolution, col_idx * self.resolution)
+        deltas =  mds - (mds[y, x])
         phi_angles = np.nan_to_num(np.arctan2(deltas, distances))
         phi_angles[phi_angles < 0] = 0.
-        svf = 0.
-        angles = 0
+        svf = self.thetas
         for a in np.linspace(0, 2*np.pi, self.thetas, endpoint=False):
             mask = np.logical_and((theta_angles >= a), (theta_angles < (a + self.delta_theta)))
             if len(phi_angles[mask]) > 0:
-                angles += 1
-                svf += (1. - np.sin(np.max(phi_angles[mask]))) #/ self.thetas
-        return svf / angles
-        # return mask 
+                svf -= np.sin(np.max(phi_angles[mask]))
+        return svf / self.thetas
+    
 
 
     def _calc_svf(self, row, col, resolution):
